@@ -1,0 +1,38 @@
+name: Weekly QA Report
+
+on:
+  schedule:
+    - cron: "15 21 * * 5"  # Every Friday at 9:15 PM UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run QA Report
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEYS: ${{ secrets.JIRA_PROJECT_KEYS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          CONFLUENCE_BASE_URL: ${{ secrets.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          CONFLUENCE_SPACE_KEY1: ${{ secrets.CONFLUENCE_SPACE_KEY1 }}
+          CONFLUENCE_PARENT_PAGE_ID1: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID1 }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python qa_report.py

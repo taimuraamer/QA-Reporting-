@@ -1,0 +1,21 @@
+# ─────────────────────────────────────────────
+# QA Report Bot — Environment Variables
+# Copy this file to .env and fill in your values
+# ─────────────────────────────────────────────
+
+# Jira
+JIRA_BASE_URL=https://yourcompany.atlassian.net
+JIRA_EMAIL=you@yourcompany.com
+JIRA_API_TOKEN=your_jira_api_token_here
+JIRA_PROJECT_KEYS=QA,PROJ
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
+SLACK_CHANNEL=#qa-report-automation
+
+# Confluence
+CONFLUENCE_BASE_URL=https://thechangecompass.atlassian.net
+CONFLUENCE_EMAIL=you@yourcompany.com
+CONFLUENCE_API_TOKEN=your_jira_api_token_here
+CONFLUENCE_SPACE_KEY1=CCA
+CONFLUENCE_PARENT_PAGE_ID1=695861249

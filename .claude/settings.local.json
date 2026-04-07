@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python qa_report.py --dry-run)",
+      "Bash(pip install:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python qa_report.py --dry-run)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c \"from dotenv import load_dotenv; import os; load_dotenv\\(\\); print\\(''BASE_URL:'', repr\\(os.getenv\\(''JIRA_BASE_URL''\\)\\)\\); print\\(''EMAIL:'', repr\\(os.getenv\\(''JIRA_EMAIL''\\)\\)\\); print\\(''PROJECT:'', repr\\(os.getenv\\(''JIRA_PROJECT_KEY''\\)\\)\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 python -c \":*)",
+      "Bash(PYTHONIOENCODING=utf-8 python qa_report.py)"
+    ]
+  }
+}

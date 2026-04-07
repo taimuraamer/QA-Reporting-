@@ -117,42 +117,70 @@ def fetch_jira_data(week_start: str, week_end: str) -> dict:
 # CLAUDE
 # ─────────────────────────────────────────────
 
-def generate_report(jira_data: dict, week_start: str, week_end: str) -> str:
-    """Uses Claude to generate a polished Slack-formatted QA report."""
-    client = anthropic.Anthropic()
+# def generate_report(jira_data: dict, week_start: str, week_end: str) -> str:
+#     """Uses Claude to generate a polished Slack-formatted QA report."""
+#     client = anthropic.Anthropic()
 
-    project_names = ", ".join(jira_data.keys())
+#     project_names = ", ".join(jira_data.keys())
 
-    prompt = f"""
-You are a QA lead writing a weekly quality report for your engineering team on Slack.
-Use Slack markdown (bold with *text*, no #headers, use emojis).
-Be concise, professional, and highlight risks clearly.
+#     prompt = f"""
+# You are a QA lead writing a weekly quality report for your engineering team on Slack.
+# Use Slack markdown (bold with *text*, no #headers, use emojis).
+# Be concise, professional, and highlight risks clearly.
 
-Week: {week_start} → {week_end}
-Projects: {project_names}
+# Week: {week_start} → {week_end}
+# Projects: {project_names}
 
---- JIRA DATA (per project) ---
-{json.dumps(jira_data, indent=2)}
+# --- JIRA DATA (per project) ---
+# {json.dumps(jira_data, indent=2)}
 
-Write the Slack report with these sections:
-1. 🐛 Bug Report — break down new, resolved, and top open bugs *per project*, then provide a combined total
-2. 🚀 Release Readiness (based on open critical/high bugs across all projects)
-3. ⚠️ Risks & Blockers (if any critical/high open bugs exist in either project)
-4. ✅ Highlights
-5. 📅 Next Steps
+# Write the Slack report with these sections:
+# 1. 🐛 Bug Report — break down new, resolved, and top open bugs *per project*, then provide a combined total
+# 2. 🚀 Release Readiness (based on open critical/high bugs across all projects)
+# 3. ⚠️ Risks & Blockers (if any critical/high open bugs exist in either project)
+# 4. ✅ Highlights
+# 5. 📅 Next Steps
 
-Keep the total under 500 words. Do NOT use markdown headers (#). Use *bold* for section titles.
-Start with: *📋 Weekly QA Report — {week_start} to {week_end}*
-"""
+# Keep the total under 500 words. Do NOT use markdown headers (#). Use *bold* for section titles.
+# Start with: *📋 Weekly QA Report — {week_start} to {week_end}*
+# """
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+#     message = client.messages.create(
+#         model="claude-sonnet-4-20250514",
+#         max_tokens=1000,
+#         messages=[{"role": "user", "content": prompt}]
+#     )
 
-    return message.content[0].text
+#     return message.content[0].text
 
+def generate_simple_report(jira_data: dict, week_start: str, week_end: str) -> str:
+    report = f"*📋 Weekly QA Report — {week_start} to {week_end}*\n\n"
+
+    total_new = 0
+    total_resolved = 0
+    total_open = 0
+
+    for project, data in jira_data.items():
+        report += f"*Project: {project}*\n"
+        report += f"• New Bugs: {data['new_bugs']['total']}\n"
+        report += f"• Resolved Bugs: {data['resolved_bugs']['total']}\n"
+        report += f"• Open Bugs: {data['open_bugs']['total']}\n\n"
+
+        total_new += data['new_bugs']['total']
+        total_resolved += data['resolved_bugs']['total']
+        total_open += data['open_bugs']['total']
+
+    report += "*Summary*\n"
+    report += f"• Total New: {total_new}\n"
+    report += f"• Total Resolved: {total_resolved}\n"
+    report += f"• Total Open: {total_open}\n\n"
+
+    if total_open > total_resolved:
+        report += "⚠️ More bugs open than resolved\n"
+    else:
+        report += "✅ Good progress on bug fixes\n"
+
+    return report
 
 # ─────────────────────────────────────────────
 # SLACK
@@ -348,7 +376,7 @@ def main():
     jira_data = fetch_jira_data(week_start, week_end)
 
     print("🤖 Generating report with Claude...")
-    report = generate_report(jira_data, week_start, week_end)
+    report = generate_simple_report(jira_data, week_start, week_end)
 
     print("\n" + "─" * 60)
     print(report)

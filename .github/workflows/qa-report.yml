@@ -34,5 +34,5 @@ jobs:
           CONFLUENCE_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           CONFLUENCE_SPACE_KEY1: ${{ secrets.CONFLUENCE_SPACE_KEY1 }}
           CONFLUENCE_PARENT_PAGE_ID1: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID1 }}
-          ANTHROPIC_API_KEY: ${{secrets.ANTHROPIC_API_KEY2}}
+          ANTHROPIC_API_KEY2: ${{secrets.ANTHROPIC_API_KEY2}}
         run: python qa_report.py

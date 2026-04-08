@@ -144,16 +144,20 @@ Write the Slack report with these sections:
 Keep the total under 500 words. Do NOT use markdown headers (#). Use *bold* for section titles.
 Start with: *📋 Weekly QA Report — {week_start} to {week_end}*
 """
-
-    message = client.messages.create(
+    try:
+        message = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
+        return message.content[0].text
 
-    return message.content[0].text
+    except anthropic.BadRequestError as e:
+            print(f"❌ Anthropic API error: {e}")
+            return f"""*📋 Weekly QA Report — {week_start} to {week_end}*
 
-
+Claude report generation failed because the Anthropic API request was rejected.
+Please check API credits/billing, then rerun the workflow."""
 
 # ─────────────────────────────────────────────
 # SLACK

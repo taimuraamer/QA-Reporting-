@@ -261,7 +261,7 @@ def create_page(title: str, body_html: str):
         "type":      "page",
         "title":     title,
         "space":     {"key": CONFLUENCE_SPACE_KEY},
-        "ancestors": [{"id": str(CONFLUENCE_PARENT_PAGE_ID)}],
+        "ancestors": [{"id": str(CONFLUENCE_PARENT_PAGE_ID_DAILY1)}],
         "body": {
             "storage": {
                 "value":          body_html,
@@ -294,7 +294,7 @@ def update_page(page_id: str, title: str, body_html: str, current_version: int):
 def post_to_confluence(title: str, body_html: str) -> str | None:
     """Creates or updates the Confluence page. Returns the page URL."""
     required = [CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN,
-                CONFLUENCE_SPACE_KEY, CONFLUENCE_PARENT_PAGE_ID]
+                CONFLUENCE_SPACE_KEY, CONFLUENCE_PARENT_PAGE_ID_DAILY1]
     if not all(required):
         print("❌ Confluence config incomplete — check your .env")
         return None

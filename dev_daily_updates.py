@@ -47,7 +47,14 @@ CONFLUENCE_PARENT_PAGE_ID_DAILY1 = os.getenv("CONFLUENCE_PARENT_PAGE_ID_DAILY1")
 
 def get_target_date(offset: int = 0) -> str:
     """Returns ISO date string for today minus offset days."""
-    return (datetime.utcnow().date() - timedelta(days=offset)).isoformat()
+    # return (datetime.utcnow().date() - timedelta(days=offset)).isoformat()
+    date = datetime.utcnow().date() - timedelta(days=offset)
+    # If today is Saturday (5) or Sunday (6), roll back to Friday
+    if date.weekday() == 5:  # Saturday
+        date -= timedelta(days=1)
+    elif date.weekday() == 6:  # Sunday
+        date -= timedelta(days=2)
+    return date.isoformat()
 
 
 # ─────────────────────────────────────────────

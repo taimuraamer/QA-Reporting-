@@ -1,8 +1,8 @@
-name: Weekly QA Report
+name: Dev Daily Update
 
 on:
   schedule:
-    - cron: "15 21 * * 5"  # Every Friday at 9:15 PM UTC
+    - cron: "0 13 * * 1-5"  # Mon–Fri at 1:00 PM UTC
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run QA Report
+      - name: Run Dev Daily Update
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -33,6 +33,6 @@ jobs:
           CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
           CONFLUENCE_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           CONFLUENCE_SPACE_KEY1: ${{ secrets.CONFLUENCE_SPACE_KEY1 }}
-          CONFLUENCE_PARENT_PAGE_ID_DAILY: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID_DAILY }}
-          ANTHROPIC_API_KEY2: ${{secrets.ANTHROPIC_API_KEY2}}
-        run: python qa_report.py
+          CONFLUENCE_PARENT_PAGE_ID_DAILY: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID_DAILY}}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY2 }}
+        run: python dev_daily_report.py

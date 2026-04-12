@@ -136,7 +136,7 @@ Projects: {project_names}
 
 Write the Slack report with these sections:
 1. 🐛 Bug Report — break down new, resolved, and top open bugs *per project*, then provide a combined total
-2. 🔴 Top Critical Issues — list the highest priority open bugs by key and summary (Highest and High priority only, max 5, pulled from open_bug_list)
+2. 🔴 Top Critical Issues — list the highest priority open bugs by key and summary from CC and A20 projects
 3. 🚀 Release Readiness (based on open critical/high bugs across all projects)
 4. ⚠️ Risks & Blockers (if any critical/high open bugs exist in either project)
 5. ✅ Highlights

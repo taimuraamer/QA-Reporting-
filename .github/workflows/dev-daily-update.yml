@@ -35,4 +35,4 @@ jobs:
           CONFLUENCE_SPACE_KEY1: ${{ secrets.CONFLUENCE_SPACE_KEY1 }}
           CONFLUENCE_PARENT_PAGE_ID_DAILY: ${{ secrets.CONFLUENCE_PARENT_PAGE_ID_DAILY}}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY2 }}
-        run: python dev-daily-report.py
+        run: python dev_daily_updates.py

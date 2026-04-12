@@ -136,10 +136,11 @@ Projects: {project_names}
 
 Write the Slack report with these sections:
 1. 🐛 Bug Report — break down new, resolved, and top open bugs *per project*, then provide a combined total
-2. 🚀 Release Readiness (based on open critical/high bugs across all projects)
-3. ⚠️ Risks & Blockers (if any critical/high open bugs exist in either project)
-4. ✅ Highlights
-5. 📅 Next Steps
+2. 🔴 Top Critical Issues — list the highest priority open bugs by key and summary (Highest and High priority only, max 5, pulled from open_bug_list)
+3. 🚀 Release Readiness (based on open critical/high bugs across all projects)
+4. ⚠️ Risks & Blockers (if any critical/high open bugs exist in either project)
+5. ✅ Highlights
+6. 📅 Next Steps
 
 Keep the total under 500 words. Do NOT use markdown headers (#). Use *bold* for section titles.
 Start with: *📋 Weekly QA Report — {week_start} to {week_end}*

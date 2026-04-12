@@ -7,7 +7,7 @@
 JIRA_BASE_URL=https://yourcompany.atlassian.net
 JIRA_EMAIL=you@yourcompany.com
 JIRA_API_TOKEN=your_jira_api_token_here
-JIRA_PROJECT_KEYS=QA,PROJ
+JIRA_PROJECT_KEYS=CC,A20
 
 # Slack
 SLACK_BOT_TOKEN=xoxb-your-slack-bot-token

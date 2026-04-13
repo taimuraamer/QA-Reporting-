@@ -1,407 +1,518 @@
-#!/usr/bin/env python3
 """
-Dev Daily Update Bot
----------------------
-Fetches tickets resolved today from Jira, grouped by assignee,
-generates a summary using Claude, and posts to Confluence as a
-dated daily update page under the configured parent folder.
+dev_daily_updates.py
+────────────────────
+Pulls Jira tickets resolved today across CC and A20 (or any configured
+projects), generates a Claude narrative, then creates/updates a Confluence
+page structured as:
 
-Usage:
-    python dev_daily_report.py                  # Run for today
-    python dev_daily_report.py --dry-run        # Preview without posting
-    python dev_daily_report.py --day-offset 1   # Run for yesterday
+  [Intro narrative]
+
+  ── CC ──────────────────────────────────
+  ### Person A
+    • [CC badge] High Priority: CC-123 - description
+  ### Person B
+    • ...
+
+  ── A20 ─────────────────────────────────
+  ### Person A
+    • [A20 badge] ...
+
+  All Resolved Tickets (N)  ← table with Project column
+
+Secrets (GitHub Actions / local .env):
+  JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEYS
+  SLACK_BOT_TOKEN, SLACK_CHANNEL
+  CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN
+  CONFLUENCE_SPACE_KEY1, CONFLUENCE_PARENT_PAGE_ID_DAILY
+  ANTHROPIC_API_KEY
 """
 
-import os
+import base64
 import json
-import argparse
-import requests
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+import logging
+import os
+import re
+from datetime import datetime, timezone
+
 import anthropic
+import requests
 
-load_dotenv(override=True)
+# ─── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
+JIRA_BASE_URL     = os.environ["JIRA_BASE_URL"].rstrip("/")
+JIRA_EMAIL        = os.environ["JIRA_EMAIL"]
+JIRA_API_TOKEN    = os.environ["JIRA_API_TOKEN"]
+JIRA_PROJECT_KEYS = [k.strip() for k in os.environ.get("JIRA_PROJECT_KEYS", "CC").split(",")]
 
-JIRA_BASE_URL     = os.getenv("JIRA_BASE_URL")
-JIRA_EMAIL        = os.getenv("JIRA_EMAIL")
-JIRA_API_TOKEN    = os.getenv("JIRA_API_TOKEN")
-JIRA_PROJECT_KEYS = [k.strip() for k in os.getenv("JIRA_PROJECT_KEYS", "").split(",") if k.strip()]
+SLACK_BOT_TOKEN   = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL     = os.environ.get("SLACK_CHANNEL", "")
 
-SLACK_BOT_TOKEN   = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL     = os.getenv("SLACK_CHANNEL")
+CONFLUENCE_BASE_URL       = os.environ["CONFLUENCE_BASE_URL"].rstrip("/")
+CONFLUENCE_EMAIL          = os.environ["CONFLUENCE_EMAIL"]
+CONFLUENCE_API_TOKEN      = os.environ["CONFLUENCE_API_TOKEN"]
+CONFLUENCE_SPACE_KEY      = os.environ["CONFLUENCE_SPACE_KEY1"]
+CONFLUENCE_PARENT_PAGE_ID = os.environ["CONFLUENCE_PARENT_PAGE_ID_DAILY"]
 
-CONFLUENCE_BASE_URL      = os.getenv("CONFLUENCE_BASE_URL")
-CONFLUENCE_EMAIL         = os.getenv("CONFLUENCE_EMAIL")
-CONFLUENCE_API_TOKEN     = os.getenv("CONFLUENCE_API_TOKEN")
-CONFLUENCE_SPACE_KEY     = os.getenv("CONFLUENCE_SPACE_KEY1")
-CONFLUENCE_PARENT_PAGE_ID_DAILY1 = os.getenv("CONFLUENCE_PARENT_PAGE_ID_DAILY1")
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-
-# ─────────────────────────────────────────────
-# DATE HELPERS
-# ─────────────────────────────────────────────
-
-def get_target_date(offset: int = 0) -> str:
-    """Returns ISO date string for today minus offset days."""
-    # return (datetime.utcnow().date() - timedelta(days=offset)).isoformat()
-    date = datetime.utcnow().date() - timedelta(days=offset)
-    # If today is Saturday (5) or Sunday (6), roll back to Friday
-    if date.weekday() == 5:  # Saturday
-        date -= timedelta(days=1)
-    elif date.weekday() == 6:  # Sunday
-        date -= timedelta(days=2)
-    return date.isoformat()
-
-
-# ─────────────────────────────────────────────
-# JIRA
-# ─────────────────────────────────────────────
-
+# Priority sort order
 PRIORITY_ORDER = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 
-def fetch_resolved_today(target_date: str) -> list:
-    """
-    Fetches all tickets that moved to Done/Ready for release/Need to test
-    on the target date, across all configured projects.
-    """
-    auth = (JIRA_EMAIL, JIRA_API_TOKEN)
-    headers = {"Accept": "application/json"}
+# Project badge colours (background, text) — extend if you add more projects
+PROJECT_BADGE_STYLES: dict[str, tuple[str, str]] = {
+    "CC":  ("#0065FF", "#FFFFFF"),   # blue
+    "A20": ("#6554C0", "#FFFFFF"),   # purple
+}
+DEFAULT_BADGE_STYLE = ("#42526E", "#FFFFFF")   # dark grey fallback
 
-    project_filter = " OR ".join([f'project = "{k}"' for k in JIRA_PROJECT_KEYS])
 
+# ─── Jira ─────────────────────────────────────────────────────────────────────
+
+def jira_auth() -> tuple[str, str]:
+    return (JIRA_EMAIL, JIRA_API_TOKEN)
+
+
+def fetch_todays_resolved_issues() -> list[dict]:
+    """Return all issues with statusCategory=Done, updated today, across all projects."""
+    project_clause = ", ".join(f'"{k}"' for k in JIRA_PROJECT_KEYS)
     jql = (
-        f'({project_filter}) '
-        f'AND statusCategory = Done '
-        f'AND updated >= "{target_date}" AND updated <= "{target_date}" '
-        f'ORDER BY assignee ASC, priority ASC'
+        f"project in ({project_clause}) "
+        f"AND statusCategory = Done "
+        f"AND updated >= startOfDay() "
+        f"ORDER BY project ASC, priority ASC, updated DESC"
     )
 
-    url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
-    params = {
-        "jql": jql,
-        "maxResults": 200,
-        "fields": "summary,priority,status,assignee,issuetype,project"
-    }
+    url    = f"{JIRA_BASE_URL}/rest/api/3/search"
+    fields = "summary,status,priority,assignee,project,issuetype,resolutiondate,updated"
+    params = {"jql": jql, "maxResults": 200, "fields": fields}
 
-    resp = requests.get(url, headers=headers, auth=auth, params=params)
+    log.info("Jira JQL: %s", jql)
+    resp = requests.get(url, params=params, auth=jira_auth(), timeout=30)
     resp.raise_for_status()
+
     issues = resp.json().get("issues", [])
+    log.info("Fetched %d resolved issue(s) today.", len(issues))
+    return issues
 
-    tickets = []
+
+def parse_issues(issues: list[dict]) -> dict[str, dict[str, list[dict]]]:
+    """
+    Returns:
+        {
+          "CC":  { "Person A": [ticket, ...], "Person B": [...] },
+          "A20": { "Person A": [...] },
+          ...
+        }
+    Only projects that actually have tickets are included.
+    Order of projects follows JIRA_PROJECT_KEYS config.
+    """
+    # Initialise with configured project order (empty dicts)
+    by_project: dict[str, dict[str, list[dict]]] = {k: {} for k in JIRA_PROJECT_KEYS}
+
     for issue in issues:
-        f = issue["fields"]
-        assignee = f.get("assignee") or {}
-        priority = f.get("priority") or {}
-        status   = f.get("status") or {}
-        project  = f.get("project") or {}
+        fields   = issue["fields"]
+        proj_key = (fields.get("project") or {}).get("key", "UNKNOWN")
+        assignee = fields.get("assignee") or {}
+        person   = assignee.get("displayName", "Unassigned")
+        priority = (fields.get("priority") or {}).get("name", "Medium")
+        key      = issue["key"]
+        summary  = fields.get("summary", "")
+        status   = (fields.get("status") or {}).get("name", "")
+        url      = f"{JIRA_BASE_URL}/browse/{key}"
 
-        tickets.append({
-            "key":      issue["key"],
-            "summary":  f.get("summary", ""),
-            "assignee": assignee.get("displayName", "Unassigned"),
-            "priority": priority.get("name", "Unknown"),
-            "status":   status.get("name", "Unknown"),
-            "project":  project.get("key", ""),
+        # Handle projects not in the config (shouldn't happen, but be safe)
+        if proj_key not in by_project:
+            by_project[proj_key] = {}
+
+        by_project[proj_key].setdefault(person, []).append({
+            "key":      key,
+            "summary":  summary,
+            "priority": priority,
+            "status":   status,
+            "url":      url,
+            "assignee": person,
+            "project":  proj_key,
         })
 
-    return tickets
+    # Sort each person's tickets by priority; remove empty projects
+    result: dict[str, dict[str, list[dict]]] = {}
+    for proj_key in JIRA_PROJECT_KEYS:
+        people = by_project.get(proj_key, {})
+        if not people:
+            continue
+        result[proj_key] = {
+            person: sorted(tickets, key=lambda t: PRIORITY_ORDER.get(t["priority"], 99))
+            for person, tickets in people.items()
+        }
+
+    return result
 
 
-def group_by_assignee(tickets: list) -> dict:
-    """Groups ticket list into {assignee: [tickets]} sorted by priority."""
-    grouped = {}
-    for t in tickets:
-        name = t["assignee"]
-        grouped.setdefault(name, []).append(t)
+# ─── Claude enrichment ────────────────────────────────────────────────────────
 
-    # Sort each assignee's tickets by priority
-    for name in grouped:
-        grouped[name].sort(key=lambda x: PRIORITY_ORDER.get(x["priority"], 99))
+def enrich_ticket_descriptions(
+    by_project: dict[str, dict[str, list[dict]]]
+) -> dict[str, dict[str, list[dict]]]:
+    """
+    Ask Claude to write a 1-2 sentence human-readable description for every ticket.
+    Adds a "description" key to each ticket dict.
+    """
+    all_tickets = [
+        t
+        for people in by_project.values()
+        for tickets in people.values()
+        for t in tickets
+    ]
+    if not all_tickets:
+        return by_project
 
-    return grouped
+    tickets_json = json.dumps(
+        [
+            {
+                "key":      t["key"],
+                "summary":  t["summary"],
+                "priority": t["priority"],
+                "project":  t["project"],
+            }
+            for t in all_tickets
+        ],
+        indent=2,
+    )
 
+    prompt = f"""For each Jira ticket below, write a single short description (1-2 sentences)
+suitable for a developer daily update report. Clearly explain what was done or achieved.
+Be specific and use plain English. Do not restate the ticket key, project, or priority.
 
-# ─────────────────────────────────────────────
-# CLAUDE
-# ─────────────────────────────────────────────
+Tickets:
+{tickets_json}
 
-def generate_summary(grouped: dict, target_date: str) -> str:
-    """Uses Claude to generate the opening narrative summary paragraph."""
-    client = anthropic.Anthropic()
+Respond ONLY with a valid JSON array:
+[
+  {{"key": "CC-123", "description": "Description here."}},
+  ...
+]"""
 
-    total = sum(len(v) for v in grouped.values())
-    dev_count = len(grouped)
-
-    prompt = f"""
-You are writing the opening summary paragraph for a Dev Daily Update page in Confluence.
-
-Date: {target_date}
-Total tickets resolved: {total}
-Developers who completed work: {dev_count}
-
-Ticket data grouped by developer:
-{json.dumps(grouped, indent=2)}
-
-Write a single short paragraph (2-3 sentences) summarising what was accomplished today.
-Mention the total ticket count, note any significant initiatives or themes (e.g. dashboard work, 
-bug fixes, UI improvements), and highlight 1-2 key completions.
-
-Be factual, concise, and professional. Do NOT use bullet points. Plain text only.
-Start with: "Today the team completed..."
-"""
-
+    client  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}]
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = message.content[0].text.strip()
+    raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+
+    descriptions: dict[str, str] = {}
+    try:
+        for item in json.loads(raw):
+            descriptions[item["key"]] = item["description"]
+    except Exception as exc:
+        log.warning("Could not parse Claude ticket descriptions: %s", exc)
+
+    # Write descriptions back into the nested structure
+    for people in by_project.values():
+        for tickets in people.values():
+            for t in tickets:
+                t["description"] = descriptions.get(t["key"], t["summary"])
+
+    return by_project
+
+
+def generate_narrative(
+    by_project: dict[str, dict[str, list[dict]]],
+    report_date: str,
+) -> str:
+    """Generate the introductory paragraph for the page."""
+    lines: list[str] = []
+    total = 0
+    for proj, people in by_project.items():
+        lines.append(f"\nProject {proj}:")
+        for person, tickets in people.items():
+            lines.append(f"  {person}:")
+            for t in tickets:
+                lines.append(f"    [{t['priority']}] {t['key']} - {t['summary']} ({t['status']})")
+                total += 1
+
+    projects_str = " and ".join(by_project.keys())
+
+    prompt = f"""You are writing the intro paragraph for a Confluence Dev Daily Update page dated {report_date}.
+
+The team resolved {total} Jira tickets today across projects: {projects_str}.
+
+Breakdown:
+{"".join(lines)}
+
+Write ONE concise paragraph (3-5 sentences) that:
+- Mentions both projects if both have tickets
+- States the total tickets completed and any notable themes or initiatives
+- Highlights the most significant work (highest-priority items)
+- Reads naturally as a daily standup summary
+- Plain prose only — no bullet points, no heading
+
+Respond with only the paragraph text."""
+
+    client  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text.strip()
 
 
-# ─────────────────────────────────────────────
-# CONFLUENCE HTML BUILDER
-# ─────────────────────────────────────────────
+# ─── Confluence page HTML builder ─────────────────────────────────────────────
 
-PRIORITY_COLOURS = {
-    "Highest": "#FF0000",
-    "High":    "#FF6600",
-    "Medium":  "#FFAA00",
-    "Low":     "#00AA00",
-    "Lowest":  "#888888",
-}
+def priority_color(priority: str) -> str:
+    return {
+        "Highest": "#FF0000",
+        "High":    "#FF8B00",
+        "Medium":  "#0065FF",
+        "Low":     "#00875A",
+        "Lowest":  "#6B778C",
+    }.get(priority, "#0065FF")
 
-def build_confluence_body(summary: str, grouped: dict, target_date: str, jira_base: str) -> str:
-    """Builds Confluence storage-format HTML matching the screenshot layout."""
 
-    formatted_date = datetime.strptime(target_date, "%Y-%m-%d").strftime("%Y-%m-%d")
-    safe_summary = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def project_badge_html(proj_key: str) -> str:
+    """Render a small coloured inline badge for the project key."""
+    bg, fg = PROJECT_BADGE_STYLES.get(proj_key, DEFAULT_BADGE_STYLE)
+    return (
+        f'<span style="background:{bg};color:{fg};border-radius:3px;'
+        f'padding:1px 6px;font-size:11px;font-weight:bold;'
+        f'margin-right:4px;">{proj_key}</span>'
+    )
 
-    html = f"""
-<p><em>Auto-generated by Claude on {datetime.utcnow().strftime("%Y-%m-%d %H:%M")} UTC</em></p>
-<p>{safe_summary}</p>
-"""
 
-    for assignee, tickets in sorted(grouped.items()):
-        html += f"<h2>{assignee}</h2>\n<ul>\n"
-        for t in tickets:
-            colour  = PRIORITY_COLOURS.get(t["priority"], "#888888")
-            key     = t["key"]
-            summary_text = t["summary"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            ticket_url   = f"{jira_base}/browse/{key}"
+def build_confluence_storage(
+    narrative: str,
+    by_project: dict[str, dict[str, list[dict]]],
+    generated_at: str,
+) -> str:
+    """Build Confluence Storage Format (XHTML)."""
 
-            html += (
-                f'<li>'
-                f'<strong><span style="color:{colour};">{t["priority"]} Priority:</span></strong> '
-                f'<a href="{ticket_url}">{key}</a> - {summary_text}'
-                f'</li>\n'
-            )
-        html += "</ul>\n"
+    all_tickets = [
+        t
+        for people in by_project.values()
+        for tickets in people.values()
+        for t in tickets
+    ]
+    total = len(all_tickets)
 
-    # All resolved tickets table
-    all_tickets = [t for tickets in grouped.values() for t in tickets]
-    html += f"""
-<h2>All Resolved Tickets ({len(all_tickets)})</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Key</th>
-      <th>Summary</th>
-      <th>Assignee</th>
-      <th>Status</th>
-    </tr>
-  </thead>
-  <tbody>
-"""
-    for t in all_tickets:
-        key          = t["key"]
-        ticket_url   = f"{jira_base}/browse/{key}"
-        summary_text = t["summary"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # ── Page header ──
+    html = (
+        f"<p><em>Auto-generated by Claude on {generated_at}</em></p>\n"
+        f"<p>{narrative}</p>\n"
+    )
+
+    # ── Per-project sections ──
+    for proj_key, people in by_project.items():
+        proj_total = sum(len(t) for t in people.values())
+        badge      = project_badge_html(proj_key)
+
         html += (
-            f"    <tr>"
-            f'<td><a href="{ticket_url}">{key}</a></td>'
-            f"<td>{summary_text}</td>"
+            f"<h1>{badge} {proj_key} "
+            f"&nbsp;<small>({proj_total} ticket{'s' if proj_total != 1 else ''})</small></h1>\n"
+        )
+
+        # Per-person subsections within this project
+        for person, tickets in sorted(people.items()):
+            html += f"<h2>{person}</h2>\n<ul>\n"
+            for t in tickets:
+                p_color = priority_color(t["priority"])
+                desc    = t.get("description", t["summary"])
+                html += (
+                    f"<li>"
+                    f'<strong><span style="color:{p_color};">{t["priority"]} Priority:</span></strong> '
+                    f"{project_badge_html(proj_key)}"
+                    f'<a href="{t["url"]}">{t["key"]}</a> – {desc}'
+                    f"</li>\n"
+                )
+            html += "</ul>\n"
+
+    # ── All resolved tickets summary table ──
+    html += f"<h2>All Resolved Tickets ({total})</h2>\n"
+    html += (
+        "<table>"
+        "<colgroup>"
+        '<col style="width:80px"/>'
+        '<col style="width:110px"/>'
+        "<col/>"
+        '<col style="width:150px"/>'
+        '<col style="width:150px"/>'
+        "</colgroup>"
+        "<tbody>"
+        "<tr>"
+        "<th><strong>Project</strong></th>"
+        "<th><strong>Key</strong></th>"
+        "<th><strong>Summary</strong></th>"
+        "<th><strong>Assignee</strong></th>"
+        "<th><strong>Status</strong></th>"
+        "</tr>\n"
+    )
+
+    for t in all_tickets:
+        html += (
+            f"<tr>"
+            f"<td>{project_badge_html(t['project'])}</td>"
+            f'<td><a href="{t["url"]}">{t["key"]}</a></td>'
+            f"<td>{t['summary']}</td>"
             f"<td>{t['assignee']}</td>"
             f"<td>{t['status']}</td>"
             f"</tr>\n"
         )
 
-    html += "  </tbody>\n</table>\n"
+    html += "</tbody></table>\n"
     return html
 
 
-# ─────────────────────────────────────────────
-# CONFLUENCE
-# ─────────────────────────────────────────────
+# ─── Confluence API ───────────────────────────────────────────────────────────
 
-def confluence_auth():
-    return (CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN)
-
-def confluence_headers():
+def _confluence_headers() -> dict:
+    token = base64.b64encode(
+        f"{CONFLUENCE_EMAIL}:{CONFLUENCE_API_TOKEN}".encode()
+    ).decode()
     return {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Authorization": f"Basic {token}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
     }
 
-def build_page_title(target_date: str) -> str:
-    dt = datetime.strptime(target_date, "%Y-%m-%d")
-    return f"Dev Daily Update – {dt.strftime('%Y-%m-%d')}"
 
-def find_existing_page(title: str):
-    url = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content"
-    params = {
-        "title":    title,
-        "spaceKey": CONFLUENCE_SPACE_KEY,
-        "expand":   "version"
-    }
-    resp = requests.get(url, headers=confluence_headers(), auth=confluence_auth(), params=params, timeout=30)
+def page_exists(title: str) -> tuple[bool, str | None]:
+    url    = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content"
+    params = {"spaceKey": CONFLUENCE_SPACE_KEY, "title": title, "expand": "version"}
+    resp   = requests.get(url, headers=_confluence_headers(), params=params, timeout=30)
     resp.raise_for_status()
     results = resp.json().get("results", [])
-    return results[0] if results else None
+    return (True, results[0]["id"]) if results else (False, None)
 
-def create_page(title: str, body_html: str):
-    url = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content"
+
+def create_confluence_page(title: str, body: str) -> str:
+    url     = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content"
     payload = {
         "type":      "page",
         "title":     title,
         "space":     {"key": CONFLUENCE_SPACE_KEY},
-        "ancestors": [{"id": str(CONFLUENCE_PARENT_PAGE_ID_DAILY1)}],
-        "body": {
-            "storage": {
-                "value":          body_html,
-                "representation": "storage"
-            }
-        }
+        "ancestors": [{"id": CONFLUENCE_PARENT_PAGE_ID}],
+        "body":      {"storage": {"value": body, "representation": "storage"}},
     }
-    resp = requests.post(url, headers=confluence_headers(), auth=confluence_auth(), json=payload, timeout=30)
+    resp     = requests.post(url, headers=_confluence_headers(), json=payload, timeout=30)
     resp.raise_for_status()
-    return resp.json()
+    page_id  = resp.json()["id"]
+    page_url = f"{CONFLUENCE_BASE_URL}/wiki/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
+    log.info("Created Confluence page: %s", page_url)
+    return page_url
 
-def update_page(page_id: str, title: str, body_html: str, current_version: int):
-    url = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content/{page_id}"
+
+def update_confluence_page(page_id: str, title: str, body: str) -> str:
+    url  = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content/{page_id}?expand=version"
+    resp = requests.get(url, headers=_confluence_headers(), timeout=30)
+    resp.raise_for_status()
+    version = resp.json()["version"]["number"]
+
+    url     = f"{CONFLUENCE_BASE_URL}/wiki/rest/api/content/{page_id}"
     payload = {
-        "id":      str(page_id),
         "type":    "page",
         "title":   title,
-        "version": {"number": current_version + 1},
-        "body": {
-            "storage": {
-                "value":          body_html,
-                "representation": "storage"
-            }
-        }
+        "version": {"number": version + 1},
+        "body":    {"storage": {"value": body, "representation": "storage"}},
     }
-    resp = requests.put(url, headers=confluence_headers(), auth=confluence_auth(), json=payload, timeout=30)
+    resp     = requests.put(url, headers=_confluence_headers(), json=payload, timeout=30)
     resp.raise_for_status()
-    return resp.json()
-
-def post_to_confluence(title: str, body_html: str) -> str | None:
-    """Creates or updates the Confluence page. Returns the page URL."""
-    required = [CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN,
-                CONFLUENCE_SPACE_KEY, CONFLUENCE_PARENT_PAGE_ID_DAILY1]
-    if not all(required):
-        print("❌ Confluence config incomplete — check your .env")
-        return None
-
-    try:
-        existing = find_existing_page(title)
-        if existing:
-            result = update_page(existing["id"], title, body_html, existing["version"]["number"])
-            print(f"✅ Confluence page updated: {title}")
-        else:
-            result = create_page(title, body_html)
-            print(f"✅ Confluence page created: {title}")
-
-        page_id  = result.get("id", "")
-        page_url = f"{CONFLUENCE_BASE_URL}/wiki/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
-        return page_url
-
-    except requests.HTTPError as e:
-        print(f"❌ Confluence HTTP error: {e.response.text}")
-        return None
-    except Exception as e:
-        print(f"❌ Confluence error: {e}")
-        return None
+    page_url = f"{CONFLUENCE_BASE_URL}/wiki/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
+    log.info("Updated Confluence page: %s", page_url)
+    return page_url
 
 
-# ─────────────────────────────────────────────
-# SLACK
-# ─────────────────────────────────────────────
+# ─── Slack ────────────────────────────────────────────────────────────────────
 
-def post_to_slack(target_date: str, total: int, page_url: str):
-    """Posts a brief Slack notification linking to the Confluence page."""
+def post_slack_notification(
+    page_url: str,
+    report_date: str,
+    by_project: dict[str, dict[str, list[dict]]],
+) -> None:
     if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
-        print("⚠️  Slack not configured — skipping notification.")
+        log.info("Slack not configured — skipping.")
         return
 
-    text = (
-        f"*📋 Dev Daily Update — {target_date}*\n"
-        f"{total} ticket(s) resolved today. "
-        f"View the full update: {page_url}"
+    lines: list[str] = [f":spiral_note_pad: *Dev Daily Update — {report_date}*"]
+    total = 0
+    for proj, people in by_project.items():
+        proj_total = sum(len(t) for t in people.values())
+        total     += proj_total
+        people_str = ", ".join(sorted(people.keys()))
+        lines.append(
+            f"  *{proj}*: {proj_total} ticket{'s' if proj_total != 1 else ''} "
+            f"by {people_str}"
+        )
+
+    lines.append(f"\n*{total} total tickets resolved today*")
+    lines.append(f"<{page_url}|View full report on Confluence>")
+
+    resp = requests.post(
+        "https://slack.com/api/chat.postMessage",
+        headers={
+            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+            "Content-Type":  "application/json",
+        },
+        json={"channel": SLACK_CHANNEL, "text": "\n".join(lines)},
+        timeout=15,
     )
-
-    url     = "https://slack.com/api/chat.postMessage"
-    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json"}
-    payload = {"channel": SLACK_CHANNEL, "text": text, "mrkdwn": True}
-
-    resp = requests.post(url, headers=headers, json=payload)
     data = resp.json()
     if data.get("ok"):
-        print(f"✅ Slack notification posted to {SLACK_CHANNEL}")
+        log.info("Slack notification sent to %s", SLACK_CHANNEL)
     else:
-        print(f"❌ Slack error: {data.get('error')}")
+        log.warning("Slack error: %s", data.get("error"))
 
 
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Dev Daily Update Bot")
-    parser.add_argument("--dry-run",    action="store_true", help="Preview without posting")
-    parser.add_argument("--day-offset", type=int, default=0, help="0 = today, 1 = yesterday, etc.")
-    parser.add_argument("--no-slack",   action="store_true", help="Skip Slack notification")
-    args = parser.parse_args()
+def main() -> None:
+    now_utc      = datetime.now(timezone.utc)
+    generated_at = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    report_date  = now_utc.strftime("%Y-%m-%d")
+    page_title   = f"Dev Daily Update – {report_date}"
 
-    target_date = get_target_date(args.day_offset)
-    print(f"\n📅 Generating Dev Daily Update for {target_date}\n")
+    log.info("=== %s ===", page_title)
 
-    print("🔍 Fetching resolved tickets from Jira...")
-    tickets = fetch_resolved_today(target_date)
-    print(f"   Found {len(tickets)} ticket(s)")
-
-    if not tickets:
-        print("ℹ️  No resolved tickets today — skipping report.")
+    # 1. Fetch all resolved tickets from Jira
+    issues = fetch_todays_resolved_issues()
+    if not issues:
+        log.warning("No resolved issues found today — skipping page creation.")
         return
 
-    grouped = group_by_assignee(tickets)
+    # 2. Parse into {project: {person: [tickets]}}
+    by_project = parse_issues(issues)
 
-    print("🤖 Generating summary with Claude...")
-    summary = generate_summary(grouped, target_date)
+    # 3. Enrich descriptions via Claude
+    log.info("Enriching ticket descriptions via Claude...")
+    by_project = enrich_ticket_descriptions(by_project)
 
-    title    = build_page_title(target_date)
-    body_html = build_confluence_body(summary, grouped, target_date, JIRA_BASE_URL)
+    # 4. Generate narrative intro via Claude
+    log.info("Generating narrative via Claude...")
+    narrative = generate_narrative(by_project, report_date)
+    log.info("Narrative: %s", narrative)
 
-    print(f"\n{'─'*60}")
-    print(f"Title: {title}")
-    print(f"\nSummary:\n{summary}")
-    print(f"\nDevelopers: {', '.join(grouped.keys())}")
-    print(f"Total tickets: {len(tickets)}")
-    print(f"{'─'*60}\n")
+    # 5. Build Confluence storage format body
+    body = build_confluence_storage(narrative, by_project, generated_at)
 
-    if args.dry_run:
-        print("🧪 Dry run — nothing posted.")
-        return
+    # 6. Publish to Confluence (create or update)
+    exists, page_id = page_exists(page_title)
+    if exists and page_id:
+        log.info("Page already exists (%s) — updating.", page_id)
+        page_url = update_confluence_page(page_id, page_title, body)
+    else:
+        page_url = create_confluence_page(page_title, body)
 
-    print("📄 Posting to Confluence...")
-    page_url = post_to_confluence(title, body_html)
+    # 7. Slack notification
+    post_slack_notification(page_url, report_date, by_project)
 
-    if page_url and not args.no_slack:
-        print("📤 Sending Slack notification...")
-        post_to_slack(target_date, len(tickets), page_url)
+    log.info("Done → %s", page_url)
 
 
 if __name__ == "__main__":

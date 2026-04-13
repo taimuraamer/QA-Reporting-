@@ -88,12 +88,19 @@ def fetch_todays_resolved_issues() -> list[dict]:
         f"ORDER BY project ASC, priority ASC, updated DESC"
     )
 
-    url    = f"{JIRA_BASE_URL}/rest/api/3/search"
-    fields = "summary,status,priority,assignee,project,issuetype,resolutiondate,updated"
-    params = {"jql": jql, "maxResults": 200, "fields": fields}
+    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    payload = {
+        "jql":        jql,
+        "maxResults": 200,
+        "fields":     ["summary", "status", "priority", "assignee",
+                       "project", "issuetype", "resolutiondate", "updated"],
+    }
 
     log.info("Jira JQL: %s", jql)
-    resp = requests.get(url, params=params, auth=jira_auth(), timeout=30)
+    resp = requests.post(
+        url, json=payload, auth=jira_auth(),
+        headers={"Content-Type": "application/json"}, timeout=30
+    )
     resp.raise_for_status()
 
     issues = resp.json().get("issues", [])
